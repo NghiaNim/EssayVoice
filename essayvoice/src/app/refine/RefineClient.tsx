@@ -1,10 +1,11 @@
 "use client";
 
-import { useState, useEffect, Suspense } from "react";
+import { useState, useEffect, useRef, Suspense } from "react";
 import { useSearchParams, useRouter } from "next/navigation";
 import Link from "next/link";
 import { Voice } from "@/lib/types";
 import EssayOutput from "@/components/EssayOutput";
+import { useAuth } from "@/context/AuthContext";
 
 function countWords(text: string): number {
   return text
@@ -13,18 +14,23 @@ function countWords(text: string): number {
     .filter((w) => w.length > 0).length;
 }
 
+type SaveStatus = "idle" | "saving" | "saved" | "error";
+
 function RefineClientInner({ voices }: { voices: Voice[] }) {
   const searchParams = useSearchParams();
   const router = useRouter();
+  const { user, token } = useAuth();
 
   const [selectedVoiceId, setSelectedVoiceId] = useState<string>(
     searchParams.get("voice") ?? ""
   );
   const [draft, setDraft] = useState("");
   const [wordLimit, setWordLimit] = useState("");
-  const [loading, setLoading] = useState(false);
+  const [isStreaming, setIsStreaming] = useState(false);
   const [essay, setEssay] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [saveStatus, setSaveStatus] = useState<SaveStatus>("idle");
+  const savedRef = useRef(false);
 
   const selectedVoice = voices.find((v) => v.id === selectedVoiceId);
 
@@ -32,6 +38,31 @@ function RefineClientInner({ voices }: { voices: Voice[] }) {
     const voiceParam = searchParams.get("voice");
     if (voiceParam) setSelectedVoiceId(voiceParam);
   }, [searchParams]);
+
+  // Auto-save after streaming completes
+  useEffect(() => {
+    if (!isStreaming && essay && essay.length > 0 && !savedRef.current && user && token) {
+      savedRef.current = true;
+      setSaveStatus("saving");
+      fetch("/api/essays", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          voiceId: selectedVoiceId,
+          voiceTone: selectedVoice?.tone ?? "",
+          outputText: essay,
+          type: "refined",
+          wordCount: countWords(essay),
+          metadata: { draft },
+        }),
+      })
+        .then((r) => (r.ok ? setSaveStatus("saved") : setSaveStatus("error")))
+        .catch(() => setSaveStatus("error"));
+    }
+  }, [isStreaming, essay, user, token, selectedVoiceId, selectedVoice, draft]);
 
   function handleVoiceChange(id: string) {
     setSelectedVoiceId(id);
@@ -42,9 +73,11 @@ function RefineClientInner({ voices }: { voices: Voice[] }) {
     e.preventDefault();
     if (!selectedVoiceId || !draft) return;
 
-    setLoading(true);
+    setIsStreaming(true);
     setError(null);
-    setEssay(null);
+    setEssay("");
+    setSaveStatus("idle");
+    savedRef.current = false;
 
     try {
       const res = await fetch("/api/refine", {
@@ -57,17 +90,29 @@ function RefineClientInner({ voices }: { voices: Voice[] }) {
         }),
       });
 
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error ?? "Unknown error");
-      setEssay(data.essay);
+      if (!res.ok || !res.body) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.error ?? "Failed to refine essay");
+      }
+
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        const chunk = decoder.decode(value, { stream: true });
+        setEssay((prev) => (prev ?? "") + chunk);
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Something went wrong");
+      setEssay(null);
     } finally {
-      setLoading(false);
+      setIsStreaming(false);
     }
   }
 
-  if (essay) {
+  if (essay !== null) {
     return (
       <div className="max-w-3xl mx-auto px-4 sm:px-6 py-12">
         <div className="mb-6 flex items-center justify-between flex-wrap gap-3">
@@ -83,19 +128,29 @@ function RefineClientInner({ voices }: { voices: Voice[] }) {
               </p>
             )}
           </div>
+          {!isStreaming && !user && (
+            <p className="text-xs text-slate-400">Sign in to save essays</p>
+          )}
         </div>
 
-        <div className="mb-4 p-4 bg-emerald-50 border border-emerald-200 rounded-xl flex gap-3">
-          <svg className="w-5 h-5 text-emerald-500 flex-shrink-0 mt-0.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-            <path strokeLinecap="round" strokeLinejoin="round" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
-          </svg>
-          <p className="text-sm text-emerald-700">
-            Your story is preserved. Only targeted edits were made to elevate
-            voice, word choice, and rhythm.
-          </p>
-        </div>
+        {!isStreaming && (
+          <div className="mb-4 p-4 bg-emerald-50 border border-emerald-200 rounded-xl flex gap-3">
+            <svg className="w-5 h-5 text-emerald-500 flex-shrink-0 mt-0.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+            </svg>
+            <p className="text-sm text-emerald-700">
+              Your story is preserved. Only targeted edits were made to elevate
+              voice, word choice, and rhythm.
+            </p>
+          </div>
+        )}
 
-        <EssayOutput essay={essay} onReset={() => setEssay(null)} />
+        <EssayOutput
+          essay={essay}
+          isStreaming={isStreaming}
+          saveStatus={saveStatus}
+          onReset={() => { setEssay(null); setSaveStatus("idle"); savedRef.current = false; }}
+        />
       </div>
     );
   }
@@ -197,8 +252,7 @@ function RefineClientInner({ voices }: { voices: Voice[] }) {
             Your Draft Essay <span className="text-red-400">*</span>
           </label>
           <p className="text-xs text-slate-500 mb-3">
-            Paste your full draft here. The refiner will make targeted edits
-            only.
+            Paste your full draft here. The refiner will make targeted edits only.
           </p>
           <textarea
             id="draft"
@@ -246,17 +300,10 @@ function RefineClientInner({ voices }: { voices: Voice[] }) {
 
         <button
           type="submit"
-          disabled={loading || !selectedVoiceId || !draft}
+          disabled={!selectedVoiceId || !draft}
           className="w-full py-3.5 bg-violet-600 hover:bg-violet-700 disabled:bg-slate-200 disabled:text-slate-400 text-white font-semibold rounded-xl transition-colors text-sm"
         >
-          {loading ? (
-            <span className="flex items-center justify-center gap-2">
-              <span className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-              Refining your essay…
-            </span>
-          ) : (
-            "Refine My Essay"
-          )}
+          Refine My Essay
         </button>
       </form>
     </div>

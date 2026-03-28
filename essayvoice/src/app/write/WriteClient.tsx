@@ -1,10 +1,11 @@
 "use client";
 
-import { useState, useEffect, Suspense } from "react";
+import { useState, useEffect, useRef, Suspense } from "react";
 import { useSearchParams, useRouter } from "next/navigation";
 import Link from "next/link";
 import { Voice } from "@/lib/types";
 import EssayOutput from "@/components/EssayOutput";
+import { useAuth } from "@/context/AuthContext";
 
 function countWords(text: string): number {
   return text
@@ -13,9 +14,12 @@ function countWords(text: string): number {
     .filter((w) => w.length > 0).length;
 }
 
+type SaveStatus = "idle" | "saving" | "saved" | "error";
+
 function WriteClientInner({ voices }: { voices: Voice[] }) {
   const searchParams = useSearchParams();
   const router = useRouter();
+  const { user, token } = useAuth();
 
   const [selectedVoiceId, setSelectedVoiceId] = useState<string>(
     searchParams.get("voice") ?? ""
@@ -23,9 +27,11 @@ function WriteClientInner({ voices }: { voices: Voice[] }) {
   const [essayPrompt, setEssayPrompt] = useState("");
   const [personalContent, setPersonalContent] = useState("");
   const [wordLimit, setWordLimit] = useState("650");
-  const [loading, setLoading] = useState(false);
+  const [isStreaming, setIsStreaming] = useState(false);
   const [essay, setEssay] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [saveStatus, setSaveStatus] = useState<SaveStatus>("idle");
+  const savedRef = useRef(false);
 
   const selectedVoice = voices.find((v) => v.id === selectedVoiceId);
 
@@ -33,6 +39,31 @@ function WriteClientInner({ voices }: { voices: Voice[] }) {
     const voiceParam = searchParams.get("voice");
     if (voiceParam) setSelectedVoiceId(voiceParam);
   }, [searchParams]);
+
+  // Auto-save after streaming completes
+  useEffect(() => {
+    if (!isStreaming && essay && essay.length > 0 && !savedRef.current && user && token) {
+      savedRef.current = true;
+      setSaveStatus("saving");
+      fetch("/api/essays", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          voiceId: selectedVoiceId,
+          voiceTone: selectedVoice?.tone ?? "",
+          outputText: essay,
+          type: "written",
+          wordCount: countWords(essay),
+          metadata: { essayPrompt, personalContent, wordLimit },
+        }),
+      })
+        .then((r) => (r.ok ? setSaveStatus("saved") : setSaveStatus("error")))
+        .catch(() => setSaveStatus("error"));
+    }
+  }, [isStreaming, essay, user, token, selectedVoiceId, selectedVoice, essayPrompt, personalContent, wordLimit]);
 
   function handleVoiceChange(id: string) {
     setSelectedVoiceId(id);
@@ -43,9 +74,11 @@ function WriteClientInner({ voices }: { voices: Voice[] }) {
     e.preventDefault();
     if (!selectedVoiceId || !essayPrompt || !personalContent) return;
 
-    setLoading(true);
+    setIsStreaming(true);
     setError(null);
-    setEssay(null);
+    setEssay("");
+    setSaveStatus("idle");
+    savedRef.current = false;
 
     try {
       const res = await fetch("/api/write", {
@@ -59,17 +92,29 @@ function WriteClientInner({ voices }: { voices: Voice[] }) {
         }),
       });
 
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error ?? "Unknown error");
-      setEssay(data.essay);
+      if (!res.ok || !res.body) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.error ?? "Failed to generate essay");
+      }
+
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        const chunk = decoder.decode(value, { stream: true });
+        setEssay((prev) => (prev ?? "") + chunk);
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Something went wrong");
+      setEssay(null);
     } finally {
-      setLoading(false);
+      setIsStreaming(false);
     }
   }
 
-  if (essay) {
+  if (essay !== null) {
     return (
       <div className="max-w-3xl mx-auto px-4 sm:px-6 py-12">
         <div className="mb-6 flex items-center justify-between flex-wrap gap-3">
@@ -85,14 +130,26 @@ function WriteClientInner({ voices }: { voices: Voice[] }) {
               </p>
             )}
           </div>
-          <Link
-            href={`/refine?voice=${selectedVoiceId}`}
-            className="text-sm font-medium text-violet-600 hover:text-violet-700 underline underline-offset-2"
-          >
-            Continue to Refiner →
-          </Link>
+          {!isStreaming && (
+            <div className="flex items-center gap-3">
+              {!user && (
+                <p className="text-xs text-slate-400">Sign in to save essays</p>
+              )}
+              <Link
+                href={`/refine?voice=${selectedVoiceId}`}
+                className="text-sm font-medium text-violet-600 hover:text-violet-700 underline underline-offset-2"
+              >
+                Continue to Refiner →
+              </Link>
+            </div>
+          )}
         </div>
-        <EssayOutput essay={essay} onReset={() => setEssay(null)} />
+        <EssayOutput
+          essay={essay}
+          isStreaming={isStreaming}
+          saveStatus={saveStatus}
+          onReset={() => { setEssay(null); setSaveStatus("idle"); savedRef.current = false; }}
+        />
       </div>
     );
   }
@@ -112,8 +169,7 @@ function WriteClientInner({ voices }: { voices: Voice[] }) {
       <form onSubmit={handleSubmit} className="space-y-6">
         <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-6">
           <label className="block text-sm font-semibold text-slate-700 mb-3">
-            Select Voice{" "}
-            <span className="text-red-400">*</span>
+            Select Voice <span className="text-red-400">*</span>
           </label>
           {voices.length === 0 ? (
             <p className="text-sm text-slate-400">No voices available.</p>
@@ -247,17 +303,10 @@ function WriteClientInner({ voices }: { voices: Voice[] }) {
 
         <button
           type="submit"
-          disabled={loading || !selectedVoiceId || !essayPrompt || !personalContent}
+          disabled={!selectedVoiceId || !essayPrompt || !personalContent}
           className="w-full py-3.5 bg-violet-600 hover:bg-violet-700 disabled:bg-slate-200 disabled:text-slate-400 text-white font-semibold rounded-xl transition-colors text-sm"
         >
-          {loading ? (
-            <span className="flex items-center justify-center gap-2">
-              <span className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-              Writing your essay…
-            </span>
-          ) : (
-            "Write My Essay"
-          )}
+          Write My Essay
         </button>
       </form>
     </div>

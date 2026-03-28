@@ -5,27 +5,22 @@ import { getVoiceById } from "@/lib/voices";
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY! });
 
 export async function POST(req: NextRequest) {
-  try {
-    const { voiceId, essayPrompt, personalContent, wordLimit } =
-      await req.json();
+  const { voiceId, essayPrompt, personalContent, wordLimit } = await req.json();
 
-    if (!voiceId || !essayPrompt || !personalContent) {
-      return NextResponse.json(
-        { error: "Missing required fields" },
-        { status: 400 }
-      );
-    }
+  if (!voiceId || !essayPrompt || !personalContent) {
+    return NextResponse.json({ error: "Missing required fields" }, { status: 400 });
+  }
 
-    const voice = await getVoiceById(voiceId);
-    if (!voice) {
-      return NextResponse.json({ error: "Voice not found" }, { status: 404 });
-    }
+  const voice = await getVoiceById(voiceId);
+  if (!voice) {
+    return NextResponse.json({ error: "Voice not found" }, { status: 404 });
+  }
 
-    const wordLimitInstruction = wordLimit
-      ? `The essay must be between ${Math.floor(wordLimit * 0.9)} and ${wordLimit} words. Be precise about this limit.`
-      : "Aim for approximately 650 words, which is the Common App limit.";
+  const wordLimitInstruction = wordLimit
+    ? `The essay must be between ${Math.floor(wordLimit * 0.9)} and ${wordLimit} words. Be precise about this limit.`
+    : "Aim for approximately 650 words, which is the Common App limit.";
 
-    const systemInstruction = `You are an expert college essay writer. Your task is to write a college application essay on behalf of a student, fully embodying a specific voice and writing style.
+  const systemInstruction = `You are an expert college essay writer. Your task is to write a college application essay on behalf of a student, fully embodying a specific voice and writing style.
 
 VOICE PROFILE:
 ${voice.persona_prompt}
@@ -58,7 +53,7 @@ INSTRUCTIONS:
 - Do NOT add any preamble, explanation, or commentary — output only the essay text
 - ${wordLimitInstruction}`;
 
-    const userMessage = `ESSAY PROMPT:
+  const userMessage = `ESSAY PROMPT:
 ${essayPrompt}
 
 STUDENT'S PERSONAL CONTENT & NOTES:
@@ -66,22 +61,35 @@ ${personalContent}
 
 Write a college essay responding to the prompt using the student's content, fully written in the voice profile provided.`;
 
-    const response = await ai.models.generateContent({
-      model: "gemini-2.5-flash",
-      contents: userMessage,
-      config: {
-        systemInstruction,
-        temperature: 0.85,
-      },
-    });
+  const encoder = new TextEncoder();
 
-    const essay = response.text;
-    return NextResponse.json({ essay });
-  } catch (err) {
-    console.error("Write API error:", err);
-    return NextResponse.json(
-      { error: "Failed to generate essay" },
-      { status: 500 }
-    );
-  }
+  const stream = new ReadableStream({
+    async start(controller) {
+      try {
+        const response = await ai.models.generateContentStream({
+          model: "gemini-2.5-flash",
+          contents: userMessage,
+          config: { systemInstruction, temperature: 0.85 },
+        });
+
+        for await (const chunk of response) {
+          const text = chunk.text;
+          if (text) controller.enqueue(encoder.encode(text));
+        }
+      } catch (err) {
+        console.error("Write stream error:", err);
+        controller.error(err);
+      } finally {
+        controller.close();
+      }
+    },
+  });
+
+  return new Response(stream, {
+    headers: {
+      "Content-Type": "text/plain; charset=utf-8",
+      "Cache-Control": "no-cache",
+      "X-Accel-Buffering": "no",
+    },
+  });
 }
