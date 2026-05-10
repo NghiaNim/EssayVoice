@@ -16,3 +16,44 @@ export interface Voice {
   avoid_in_imitation: string[];
   sample_sentence: string;
 }
+
+export const BULLET_CATEGORIES = [
+  "Story beats",
+  "Specific details",
+  "Tensions & stakes",
+  "Voice cues",
+  "What this reveals",
+] as const;
+
+export type BulletCategory = (typeof BULLET_CATEGORIES)[number];
+
+export interface BrainstormQuestion {
+  id: string;
+  text: string;
+  hint?: string;
+}
+
+export interface BrainstormAnswer {
+  questionId: string;
+  question: string;
+  answer: string;
+}
+
+export interface Bullet {
+  id: string;
+  category: BulletCategory;
+  text: string;
+  source: "user" | "suggested";
+}
+
+export interface ProfileQA {
+  question: string;
+  answer: string;
+  at: string;
+}
+
+export interface UserProfile {
+  profileText: string;
+  recentQa: ProfileQA[];
+  totalFacts: number;
+}

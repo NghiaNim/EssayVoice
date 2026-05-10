@@ -29,3 +29,15 @@ export function extractToken(authHeader: string | null): string | null {
   if (!authHeader?.startsWith("Bearer ")) return null;
   return authHeader.slice(7);
 }
+
+export async function getUserFromRequest(
+  req: Request,
+): Promise<TokenPayload | null> {
+  const token = extractToken(req.headers.get("authorization"));
+  if (!token) return null;
+  try {
+    return await verifyToken(token);
+  } catch {
+    return null;
+  }
+}

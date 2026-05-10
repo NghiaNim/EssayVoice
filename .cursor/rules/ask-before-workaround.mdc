@@ -1,0 +1,37 @@
+---
+description: Ask the user for help instead of attempting workarounds when proper auth or credentials are missing
+alwaysApply: true
+---
+
+# Ask Before Workaround
+
+When blocked by missing credentials, insufficient permissions, or a required manual action — **stop and ask the user** rather than attempting workarounds.
+
+## Rule
+
+If a task requires:
+- An API key or token you don't have
+- A permission level beyond what's been provided
+- A manual action in an external dashboard (e.g. Supabase SQL editor, AWS console, Vercel)
+- A CLI tool that isn't installed
+
+**Do not:**
+- Try alternative endpoints hoping one works
+- Build temporary shims or one-off routes to bypass the gap
+- Silently skip the step and move on
+
+**Do:**
+- State exactly what is blocking you
+- Explain what credential/action/tool is needed and why
+- Provide the exact SQL, command, or config for the user to run themselves
+- Wait for confirmation before proceeding
+
+## Example
+
+❌ BAD — trying 4 different API endpoints hoping one accepts the wrong key type
+
+✅ GOOD:
+> "I can't create the Supabase table via the REST API — that requires DDL which PostgREST doesn't support. Please run this SQL in your [Supabase SQL Editor](https://supabase.com/dashboard/project/_/sql/new) and let me know when done:"
+> ```sql
+> CREATE TABLE IF NOT EXISTS ...
+> ```
